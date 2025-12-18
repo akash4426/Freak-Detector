@@ -20,7 +20,14 @@ PATH_HAND_ON_HEAD      = "memes/ammathodu-pottodu.gif"
 PATH_INDEX_POINTING     = "memes/thaali-pottodu-converted.mp4"
 PATH_INDEX_ARM_RAISE    = "memes/sai.gif"
 
+# ==========================================
+#             GLOBAL SETTINGS
+# ==========================================
+
 IDLE_MIN_FRAMES = 70
+COOLDOWN_FRAMES = 30
+REQUIRED_FRAMES = 6
+
 idle_hold = 0
 palm_dist_buffer = deque(maxlen=20)
 
@@ -423,150 +430,159 @@ def evaluate_gesture_priority(
 #                 MAIN LOOP
 # ==========================================
 
-cap = cv2.VideoCapture(0)
-frame_counter = 0
-gesture_hold = 0
+def run_opencv_app():
+    """Main function to run the OpenCV application"""
+    global cooldown, idle_hold
+    
+    cap = cv2.VideoCapture(0)
+    frame_counter = 0
+    gesture_hold = 0
+    cooldown = 0
 
-while True:
-    ok, frame = cap.read()
-    if not ok:
-        break
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
 
-    frame = cv2.flip(frame, 1)
-    h, w, _ = frame.shape
-    cam_h = 480
-    cam_w = 640
+        frame = cv2.flip(frame, 1)
+        h, w, _ = frame.shape
+        cam_h = 480
+        cam_w = 640
 
-    resized_cam = cv2.resize(frame, (cam_w, cam_h))
+        resized_cam = cv2.resize(frame, (cam_w, cam_h))
 
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    face_result = face_mesh.process(rgb)
-    hands_result = hands.process(rgb)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        face_result = face_mesh.process(rgb)
+        hands_result = hands.process(rgb)
 
-    face_lm = None
-    hand_lms = []
+        face_lm = None
+        hand_lms = []
 
-    if face_result.multi_face_landmarks:
-        face_lm = face_result.multi_face_landmarks[0].landmark
-        nose_x_buffer.append(face_lm[1].x)
-        nose_y_buffer.append(face_lm[1].y)
+        if face_result.multi_face_landmarks:
+            face_lm = face_result.multi_face_landmarks[0].landmark
+            nose_x_buffer.append(face_lm[1].x)
+            nose_y_buffer.append(face_lm[1].y)
 
-    if hands_result.multi_hand_landmarks:
-        hand_lms = hands_result.multi_hand_landmarks
+        if hands_result.multi_hand_landmarks:
+            hand_lms = hands_result.multi_hand_landmarks
 
-    # Detect all gestures
-    shy_gesture = False
-    both_hands_chin = False
-    hand_on_head = False
-    pointing_at_camera = False
-    fist_raised = False
-    angry_face = False
-    eyebrows_raised = False
-    biting_teeth = False
+        # Detect all gestures
+        shy_gesture = False
+        both_hands_chin = False
+        hand_on_head = False
+        pointing_at_camera = False
+        fist_raised = False
+        angry_face = False
+        eyebrows_raised = False
+        biting_teeth = False
 
-    if face_lm:
-        angry_face = detect_angry_face(face_lm)
-        eyebrows_raised = detect_eyebrows_raised(face_lm)
-        biting_teeth = detect_biting_teeth(face_lm)
+        if face_lm:
+            angry_face = detect_angry_face(face_lm)
+            eyebrows_raised = detect_eyebrows_raised(face_lm)
+            biting_teeth = detect_biting_teeth(face_lm)
 
-    if hand_lms:
-        if len(hand_lms) == 1:
-            hl = hand_lms[0]
-            pointing_at_camera = detect_pointing_at_camera(hl)
-            fist_raised = detect_fist_raised(hl)
-            if face_lm:
-                shy_gesture = detect_shy_gesture(face_lm, hl)
-                hand_on_head = detect_hand_on_head(face_lm, hl)
+        if hand_lms:
+            if len(hand_lms) == 1:
+                hl = hand_lms[0]
+                pointing_at_camera = detect_pointing_at_camera(hl)
+                fist_raised = detect_fist_raised(hl)
+                if face_lm:
+                    shy_gesture = detect_shy_gesture(face_lm, hl)
+                    hand_on_head = detect_hand_on_head(face_lm, hl)
 
-        if len(hand_lms) >= 2 and face_lm:
-            both_hands_chin = detect_both_hands_under_chin(face_lm, hand_lms)
+            if len(hand_lms) >= 2 and face_lm:
+                both_hands_chin = detect_both_hands_under_chin(face_lm, hand_lms)
 
-    highest = evaluate_gesture_priority(
-        shy_gesture,
-        angry_face, eyebrows_raised, biting_teeth,
-        both_hands_chin, hand_on_head, pointing_at_camera, fist_raised
-    )
+        highest = evaluate_gesture_priority(
+            shy_gesture,
+            angry_face, eyebrows_raised, biting_teeth,
+            both_hands_chin, hand_on_head, pointing_at_camera, fist_raised
+        )
 
-    if cooldown > 0:
-        cooldown -= 1
-        highest = "none"
+        if cooldown > 0:
+            cooldown -= 1
+            highest = "none"
 
-    if highest != "none":
-        gesture_hold += 1
-    else:
-        gesture_hold = 0
+        if highest != "none":
+            gesture_hold += 1
+        else:
+            gesture_hold = 0
 
-    if gesture_hold >= REQUIRED_FRAMES and cooldown == 0:
-        print("🎯 Trigger:", highest)
-        gesture_hold = 0
-        cooldown = COOLDOWN_FRAMES
+        if gesture_hold >= REQUIRED_FRAMES and cooldown == 0:
+            print("🎯 Trigger:", highest)
+            gesture_hold = 0
+            cooldown = COOLDOWN_FRAMES
 
-        if highest == "fist_raised":
-            activate_gif(GIF_ARM_RAISE)
-        elif highest == "pointing_at_camera":
-            activate_video(PATH_INDEX_POINTING)
-        elif highest == "shy_gesture":
-            activate_gif(GIF_SHY_BITE)
-        elif highest == "hand_on_head":
-            activate_gif(GIF_HAND_ON_HEAD)
-        elif highest == "angry_face":
-            activate_gif(GIF_ANGRY_FACE)
-        elif highest == "eyebrows_raised":
-            activate_gif(GIF_EYEBROWS_UP)
-        elif highest == "biting_teeth":
-            activate_gif(GIF_BITING_TEETH)
-        elif highest == "both_hands_chin":
-            activate_gif(GIF_BOTH_HANDS_CHIN)
+            if highest == "fist_raised":
+                activate_gif(GIF_ARM_RAISE)
+            elif highest == "pointing_at_camera":
+                activate_video(PATH_INDEX_POINTING)
+            elif highest == "shy_gesture":
+                activate_gif(GIF_SHY_BITE)
+            elif highest == "hand_on_head":
+                activate_gif(GIF_HAND_ON_HEAD)
+            elif highest == "angry_face":
+                activate_gif(GIF_ANGRY_FACE)
+            elif highest == "eyebrows_raised":
+                activate_gif(GIF_EYEBROWS_UP)
+            elif highest == "biting_teeth":
+                activate_gif(GIF_BITING_TEETH)
+            elif highest == "both_hands_chin":
+                activate_gif(GIF_BOTH_HANDS_CHIN)
 
-    # BUILD RIGHT PANEL
-    if active_mode == "gif":
-        if len(current_gif_frames) > 0:
-            frame_to_show = current_gif_frames[current_gif_index]
-            current_gif_index += 1
-            if current_gif_index >= len(current_gif_frames):
+        # BUILD RIGHT PANEL
+        if active_mode == "gif":
+            if len(current_gif_frames) > 0:
+                frame_to_show = current_gif_frames[current_gif_index]
+                current_gif_index += 1
+                if current_gif_index >= len(current_gif_frames):
+                    set_idle_state()
+                frame_to_show = cv2.resize(frame_to_show, (cam_w, cam_h))
+            else:
+                frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+
+        elif active_mode == "image":
+            if len(current_gif_frames) > 0:
+                frame_to_show = cv2.resize(current_gif_frames[0], (cam_w, cam_h))
+            else:
+                frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+
+        elif active_mode == "video":
+            if not video_queue.empty():
+                frame_to_show = cv2.resize(video_queue.get(), (cam_w, cam_h))
+            elif video_done_flag.is_set():
                 set_idle_state()
-            frame_to_show = cv2.resize(frame_to_show, (cam_w, cam_h))
+                frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+            else:
+                frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+
+        elif active_mode == "idle":
+            frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+
         else:
             frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
 
-    elif active_mode == "image":
-        if len(current_gif_frames) > 0:
-            frame_to_show = cv2.resize(current_gif_frames[0], (cam_w, cam_h))
-        else:
-            frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+        # SAFETY NORMALIZATION
+        if frame_to_show is None or not isinstance(frame_to_show, np.ndarray):
+            frame_to_show = np.zeros_like(resized_cam)
 
-    elif active_mode == "video":
-        if not video_queue.empty():
-            frame_to_show = cv2.resize(video_queue.get(), (cam_w, cam_h))
-        elif video_done_flag.is_set():
-            set_idle_state()
-            frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-        else:
-            frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+        if len(frame_to_show.shape) == 2:
+            frame_to_show = cv2.cvtColor(frame_to_show, cv2.COLOR_GRAY2BGR)
 
-    elif active_mode == "idle":
-        frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+        if frame_to_show.shape[2] == 4:
+            frame_to_show = frame_to_show[:, :, :3]
 
-    else:
-        frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+        frame_to_show = cv2.resize(frame_to_show, (resized_cam.shape[1], resized_cam.shape[0]))
 
-    # SAFETY NORMALIZATION
-    if frame_to_show is None or not isinstance(frame_to_show, np.ndarray):
-        frame_to_show = np.zeros_like(resized_cam)
+        combined = cv2.hconcat([resized_cam, frame_to_show])
+        cv2.imshow("Freak Detector", combined)
 
-    if len(frame_to_show.shape) == 2:
-        frame_to_show = cv2.cvtColor(frame_to_show, cv2.COLOR_GRAY2BGR)
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
 
-    if frame_to_show.shape[2] == 4:
-        frame_to_show = frame_to_show[:, :, :3]
+    cap.release()
+    cv2.destroyAllWindows()
 
-    frame_to_show = cv2.resize(frame_to_show, (resized_cam.shape[1], resized_cam.shape[0]))
 
-    combined = cv2.hconcat([resized_cam, frame_to_show])
-    cv2.imshow("Freak Detector", combined)
-
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    run_opencv_app()
