@@ -1,11 +1,81 @@
+import streamlit as st
 import cv2
 import mediapipe as mp
 import numpy as np
 from collections import deque
-import threading
-import queue
 import time
-from PIL import Image 
+from PIL import Image
+
+# ==========================================
+#          PAGE CONFIGURATION
+# ==========================================
+
+st.set_page_config(
+    page_title="🎭 Freak Detector",
+    page_icon="🎭",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ==========================================
+#          CUSTOM CSS STYLING
+# ==========================================
+
+st.markdown("""
+    <style>
+    .main {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    .stApp {
+        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+    }
+    
+    h1 {
+        color: #ffffff;
+        font-family: 'Helvetica Neue', sans-serif;
+        text-align: center;
+        padding: 20px;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+    }
+    
+    .stButton>button {
+        width: 100%;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        padding: 15px;
+        border-radius: 10px;
+        font-weight: bold;
+        font-size: 16px;
+        transition: all 0.3s;
+    }
+    
+    .stButton>button:hover {
+        transform: scale(1.05);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+    }
+    
+    .gesture-badge {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        color: white;
+        padding: 10px 20px;
+        border-radius: 20px;
+        font-weight: bold;
+        display: inline-block;
+        margin: 5px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+    }
+    
+    .info-box {
+        background: rgba(52, 152, 219, 0.2);
+        border-left: 4px solid #3498db;
+        padding: 15px;
+        border-radius: 5px;
+        margin: 10px 0;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # ==========================================
 #             FILE PATHS (ALL MEMES)
@@ -17,8 +87,8 @@ PATH_BOTH_HANDS_CHIN   = "memes/pottodu-cries.gif"
 PATH_EYEBROWS_UP       = "memes/pottodu-liftingeyebrows.gif"
 PATH_BITING_TEETH      = "memes/pottodu-bitingteeth.gif"
 PATH_HAND_ON_HEAD      = "memes/ammathodu-pottodu.gif"
-PATH_INDEX_POINTING     = "memes/thaali-pottodu-converted.mp4"
-PATH_INDEX_ARM_RAISE    = "memes/sai.gif"
+PATH_INDEX_POINTING    = "memes/thaali-pottodu-converted.mp4"
+PATH_INDEX_ARM_RAISE   = "memes/sai.gif"
 
 # ==========================================
 #             GLOBAL SETTINGS
@@ -28,20 +98,30 @@ IDLE_MIN_FRAMES = 70
 COOLDOWN_FRAMES = 30
 REQUIRED_FRAMES = 6
 
-idle_hold = 0
-palm_dist_buffer = deque(maxlen=20)
+# ==========================================
+#          SESSION STATE INITIALIZATION
+# ==========================================
+
+if 'running' not in st.session_state:
+    st.session_state.running = False
+if 'gesture_count' not in st.session_state:
+    st.session_state.gesture_count = 0
+if 'last_gesture' not in st.session_state:
+    st.session_state.last_gesture = "None"
+if 'gesture_history' not in st.session_state:
+    st.session_state.gesture_history = []
 
 # ==========================================
 #          GIF LOADING ENGINE
 # ==========================================
 
+@st.cache_resource
 def load_gif_frames(path):
-    """Load all GIF frames as a list of BGR numpy arrays."""
+    """Load all GIF frames as a list of RGB numpy arrays."""
     frames = []
     try:
         gif = Image.open(path)
     except:
-        print(f"❌ Error loading GIF: {path}")
         return frames
 
     try:
@@ -50,8 +130,7 @@ def load_gif_frames(path):
             gif.seek(frame_index)
             frame = gif.convert("RGB")
             np_frame = np.array(frame)
-            bgr = cv2.cvtColor(np_frame, cv2.COLOR_RGB2BGR)
-            frames.append(bgr)
+            frames.append(np_frame)
             frame_index += 1
     except EOFError:
         pass
@@ -60,93 +139,39 @@ def load_gif_frames(path):
 
 
 # Preload all GIFs at start for speed
-GIF_SHY_BITE      = load_gif_frames(PATH_SHY_BITE)
-GIF_ANGRY_FACE    = load_gif_frames(PATH_ANGRY_FACE)
-GIF_BOTH_HANDS_CHIN = load_gif_frames(PATH_BOTH_HANDS_CHIN)
-GIF_EYEBROWS_UP   = load_gif_frames(PATH_EYEBROWS_UP)
-GIF_BITING_TEETH  = load_gif_frames(PATH_BITING_TEETH)
-GIF_HAND_ON_HEAD  = load_gif_frames(PATH_HAND_ON_HEAD)
-GIF_ARM_RAISE     = load_gif_frames(PATH_INDEX_ARM_RAISE)
+@st.cache_resource
+def load_all_memes():
+    return {
+        'shy': load_gif_frames(PATH_SHY_BITE),
+        'angry': load_gif_frames(PATH_ANGRY_FACE),
+        'both_hands': load_gif_frames(PATH_BOTH_HANDS_CHIN),
+        'eyebrows': load_gif_frames(PATH_EYEBROWS_UP),
+        'teeth': load_gif_frames(PATH_BITING_TEETH),
+        'head': load_gif_frames(PATH_HAND_ON_HEAD),
+        'arm': load_gif_frames(PATH_INDEX_ARM_RAISE),
+    }
 
-# ==========================================
-#       IMAGE LOADING FOR STILL MEMES
-# ==========================================
-
-# No static images currently used
-
-
-# ==========================================
-#            VIDEO PLAYBACK THREAD
-# ==========================================
-
-video_queue = queue.Queue(maxsize=1)
-play_video_flag = threading.Event()
-video_done_flag = threading.Event()
-
-CURRENT_VIDEO = None
-
-
-def video_player_thread():
-    """Thread that plays MP4 meme videos ONCE and outputs frames to queue."""
-    global CURRENT_VIDEO
-
-    while True:
-        play_video_flag.wait()
-
-        vid = cv2.VideoCapture(CURRENT_VIDEO)
-
-        if not vid.isOpened():
-            print("❌ Unable to open video:", CURRENT_VIDEO)
-            play_video_flag.clear()
-            continue
-
-        while play_video_flag.is_set():
-            ok, frame = vid.read()
-            if not ok:
-                break
-
-            if not video_queue.full():
-                video_queue.put(frame)
-
-            time.sleep(0.01)
-
-        vid.release()
-        video_done_flag.set()
-        play_video_flag.clear()
-
-
-threading.Thread(target=video_player_thread, daemon=True).start()
-
-
-# ==========================================
-#      STATE MANAGEMENT + GLOBAL SETTINGS
-# ==========================================
-
-COOLDOWN_FRAMES = 30
-cooldown = 0
-REQUIRED_FRAMES = 6
-
-nose_x_buffer = deque(maxlen=15)
-nose_y_buffer = deque(maxlen=20)
-
-active_mode = "idle"
-current_gif_frames = []
-current_gif_index = 0
+meme_library = load_all_memes()
 
 # ==========================================
 #         MEDIAPIPE INITIALIZATION
 # ==========================================
 
-mp_face = mp.solutions.face_mesh
-face_mesh = mp_face.FaceMesh(max_num_faces=1, refine_landmarks=True)
+@st.cache_resource
+def load_mediapipe_models():
+    mp_face = mp.solutions.face_mesh
+    face_mesh = mp_face.FaceMesh(max_num_faces=1, refine_landmarks=True)
+    
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        max_num_hands=2,
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.6
+    )
+    
+    return face_mesh, hands
 
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    max_num_hands=2,
-    min_detection_confidence=0.6,
-    min_tracking_confidence=0.6
-)
-
+face_mesh, hands = load_mediapipe_models()
 
 # ==========================================
 #       GESTURE DETECTION FUNCTIONS
@@ -361,44 +386,6 @@ def detect_fist_raised(hand_lm):
 
 
 # ==========================================
-#   PLAYBACK ENGINE
-# ==========================================
-
-def activate_gif(gif_frames):
-    global active_mode, current_gif_frames, current_gif_index
-    active_mode = "gif"
-    current_gif_frames = gif_frames
-    current_gif_index = 0
-    video_done_flag.set()
-    play_video_flag.clear()
-
-
-def activate_image(img):
-    global active_mode, current_gif_frames
-    active_mode = "image"
-    current_gif_frames = [img]
-    video_done_flag.set()
-    play_video_flag.clear()
-
-
-def activate_video(path):
-    global active_mode, CURRENT_VIDEO
-    active_mode = "video"
-    CURRENT_VIDEO = path
-    video_done_flag.clear()
-    play_video_flag.set()
-
-
-def set_idle_state():
-    global active_mode, current_gif_frames, current_gif_index
-    active_mode = "idle"
-    current_gif_frames = []
-    current_gif_index = 0
-    play_video_flag.clear()
-    video_done_flag.set()
-
-
-# ==========================================
 #         PRIORITY ORDER FOR GESTURES
 # ==========================================
 
@@ -408,181 +395,214 @@ def evaluate_gesture_priority(
         both_hands_chin, hand_on_head, pointing_at_camera, fist_raised
     ):
     if fist_raised:
-        return "fist_raised"
+        return "fist_raised", "🤜 Fist Raised"
     if pointing_at_camera:
-        return "pointing_at_camera"
+        return "pointing_at_camera", "👉 Pointing at Camera"
     if shy_gesture:
-        return "shy_gesture"
+        return "shy_gesture", "😳 Shy Gesture"
     if eyebrows_raised:
-        return "eyebrows_raised"
+        return "eyebrows_raised", "😲 Eyebrows Raised"
     if hand_on_head:
-        return "hand_on_head"
+        return "hand_on_head", "🤦 Hand on Head"
     if both_hands_chin:
-        return "both_hands_chin"
+        return "both_hands_chin", "🥺 Both Hands Under Chin"
     if angry_face:
-        return "angry_face"
+        return "angry_face", "😠 Angry Face"
     if biting_teeth:
-        return "biting_teeth"
-    return "none"
+        return "biting_teeth", "😁 Biting Teeth"
+    return "none", "None"
 
 
 # ==========================================
-#                 MAIN LOOP
+#            MAIN STREAMLIT APP
 # ==========================================
 
-def run_opencv_app():
-    """Main function to run the OpenCV application"""
-    global cooldown, idle_hold
+def main():
+    # Header
+    st.markdown("<h1>🎭 Freak Detector - Real-Time Gesture Recognition</h1>", unsafe_allow_html=True)
     
-    cap = cv2.VideoCapture(0)
-    frame_counter = 0
-    gesture_hold = 0
-    cooldown = 0
-
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-
-        frame = cv2.flip(frame, 1)
-        h, w, _ = frame.shape
-        cam_h = 480
-        cam_w = 640
-
-        resized_cam = cv2.resize(frame, (cam_w, cam_h))
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face_result = face_mesh.process(rgb)
-        hands_result = hands.process(rgb)
-
-        face_lm = None
-        hand_lms = []
-
-        if face_result.multi_face_landmarks:
-            face_lm = face_result.multi_face_landmarks[0].landmark
-            nose_x_buffer.append(face_lm[1].x)
-            nose_y_buffer.append(face_lm[1].y)
-
-        if hands_result.multi_hand_landmarks:
-            hand_lms = hands_result.multi_hand_landmarks
-
-        # Detect all gestures
-        shy_gesture = False
-        both_hands_chin = False
-        hand_on_head = False
-        pointing_at_camera = False
-        fist_raised = False
-        angry_face = False
-        eyebrows_raised = False
-        biting_teeth = False
-
-        if face_lm:
-            angry_face = detect_angry_face(face_lm)
-            eyebrows_raised = detect_eyebrows_raised(face_lm)
-            biting_teeth = detect_biting_teeth(face_lm)
-
-        if hand_lms:
-            if len(hand_lms) == 1:
-                hl = hand_lms[0]
-                pointing_at_camera = detect_pointing_at_camera(hl)
-                fist_raised = detect_fist_raised(hl)
-                if face_lm:
-                    shy_gesture = detect_shy_gesture(face_lm, hl)
-                    hand_on_head = detect_hand_on_head(face_lm, hl)
-
-            if len(hand_lms) >= 2 and face_lm:
-                both_hands_chin = detect_both_hands_under_chin(face_lm, hand_lms)
-
-        highest = evaluate_gesture_priority(
-            shy_gesture,
-            angry_face, eyebrows_raised, biting_teeth,
-            both_hands_chin, hand_on_head, pointing_at_camera, fist_raised
-        )
-
-        if cooldown > 0:
-            cooldown -= 1
-            highest = "none"
-
-        if highest != "none":
-            gesture_hold += 1
-        else:
-            gesture_hold = 0
-
-        if gesture_hold >= REQUIRED_FRAMES and cooldown == 0:
-            print("🎯 Trigger:", highest)
-            gesture_hold = 0
-            cooldown = COOLDOWN_FRAMES
-
-            if highest == "fist_raised":
-                activate_gif(GIF_ARM_RAISE)
-            elif highest == "pointing_at_camera":
-                activate_video(PATH_INDEX_POINTING)
-            elif highest == "shy_gesture":
-                activate_gif(GIF_SHY_BITE)
-            elif highest == "hand_on_head":
-                activate_gif(GIF_HAND_ON_HEAD)
-            elif highest == "angry_face":
-                activate_gif(GIF_ANGRY_FACE)
-            elif highest == "eyebrows_raised":
-                activate_gif(GIF_EYEBROWS_UP)
-            elif highest == "biting_teeth":
-                activate_gif(GIF_BITING_TEETH)
-            elif highest == "both_hands_chin":
-                activate_gif(GIF_BOTH_HANDS_CHIN)
-
-        # BUILD RIGHT PANEL
-        if active_mode == "gif":
-            if len(current_gif_frames) > 0:
-                frame_to_show = current_gif_frames[current_gif_index]
-                current_gif_index += 1
-                if current_gif_index >= len(current_gif_frames):
-                    set_idle_state()
-                frame_to_show = cv2.resize(frame_to_show, (cam_w, cam_h))
+    # Sidebar
+    with st.sidebar:
+        st.markdown("### ⚙️ Control Panel")
+        
+        if st.button("🎥 Start Detection" if not st.session_state.running else "⏹️ Stop Detection"):
+            st.session_state.running = not st.session_state.running
+        
+        st.markdown("---")
+        
+        st.markdown("### 📊 Statistics")
+        st.metric("Total Gestures Detected", st.session_state.gesture_count)
+        st.metric("Last Gesture", st.session_state.last_gesture)
+        
+        st.markdown("---")
+        
+        st.markdown("### 🎭 Supported Gestures")
+        gestures = [
+            "🤜 Fist Raised",
+            "👉 Pointing at Camera",
+            "😳 Shy Gesture",
+            "🤦 Hand on Head",
+            "😠 Angry Face",
+            "😲 Eyebrows Raised",
+            "😁 Biting Teeth",
+            "🥺 Both Hands Under Chin"
+        ]
+        for gesture in gestures:
+            st.markdown(f'<div class="gesture-badge">{gesture}</div>', unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        st.markdown("### ⚡ Settings")
+        sensitivity = st.slider("Detection Sensitivity", 1, 10, 6, 
+                               help="Lower = more sensitive")
+        cooldown = st.slider("Cooldown (frames)", 10, 60, 30,
+                            help="Pause between gesture detections")
+        
+        st.markdown("---")
+        
+        st.markdown("""
+        <div class="info-box">
+        <strong>💡 Tips:</strong><br>
+        • Hold gestures for ~200ms<br>
+        • Good lighting helps<br>
+        • Position face in center<br>
+        • Close app from sidebar
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Main content area
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 📹 Live Webcam Feed")
+        webcam_placeholder = st.empty()
+    
+    with col2:
+        st.markdown("### 🎬 Meme Response")
+        meme_placeholder = st.empty()
+    
+    status_placeholder = st.empty()
+    
+    # Video processing
+    if st.session_state.running:
+        cap = cv2.VideoCapture(0)
+        
+        gesture_hold = 0
+        cooldown_counter = 0
+        current_meme_frames = []
+        current_meme_index = 0
+        
+        REQUIRED_FRAMES = sensitivity
+        COOLDOWN_FRAMES = cooldown
+        
+        while st.session_state.running:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame = cv2.flip(frame, 1)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Process with MediaPipe
+            face_result = face_mesh.process(rgb)
+            hands_result = hands.process(rgb)
+            
+            face_lm = None
+            hand_lms = []
+            
+            if face_result.multi_face_landmarks:
+                face_lm = face_result.multi_face_landmarks[0].landmark
+            
+            if hands_result.multi_hand_landmarks:
+                hand_lms = hands_result.multi_hand_landmarks
+            
+            # Detect gestures
+            shy_gesture = False
+            both_hands_chin = False
+            hand_on_head = False
+            pointing_at_camera = False
+            fist_raised = False
+            angry_face = False
+            eyebrows_raised = False
+            biting_teeth = False
+            
+            if face_lm:
+                angry_face = detect_angry_face(face_lm)
+                eyebrows_raised = detect_eyebrows_raised(face_lm)
+                biting_teeth = detect_biting_teeth(face_lm)
+            
+            if hand_lms:
+                if len(hand_lms) == 1:
+                    hl = hand_lms[0]
+                    pointing_at_camera = detect_pointing_at_camera(hl)
+                    fist_raised = detect_fist_raised(hl)
+                    if face_lm:
+                        shy_gesture = detect_shy_gesture(face_lm, hl)
+                        hand_on_head = detect_hand_on_head(face_lm, hl)
+                
+                if len(hand_lms) >= 2 and face_lm:
+                    both_hands_chin = detect_both_hands_under_chin(face_lm, hand_lms)
+            
+            gesture_key, gesture_name = evaluate_gesture_priority(
+                shy_gesture, angry_face, eyebrows_raised, biting_teeth,
+                both_hands_chin, hand_on_head, pointing_at_camera, fist_raised
+            )
+            
+            if cooldown_counter > 0:
+                cooldown_counter -= 1
+                gesture_key = "none"
+            
+            if gesture_key != "none":
+                gesture_hold += 1
             else:
-                frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-
-        elif active_mode == "image":
-            if len(current_gif_frames) > 0:
-                frame_to_show = cv2.resize(current_gif_frames[0], (cam_w, cam_h))
+                gesture_hold = 0
+            
+            # Trigger meme
+            if gesture_hold >= REQUIRED_FRAMES and cooldown_counter == 0:
+                gesture_hold = 0
+                cooldown_counter = COOLDOWN_FRAMES
+                st.session_state.gesture_count += 1
+                st.session_state.last_gesture = gesture_name
+                st.session_state.gesture_history.append(gesture_name)
+                
+                # Load appropriate meme
+                if gesture_key == "fist_raised":
+                    current_meme_frames = meme_library['arm']
+                elif gesture_key == "shy_gesture":
+                    current_meme_frames = meme_library['shy']
+                elif gesture_key == "hand_on_head":
+                    current_meme_frames = meme_library['head']
+                elif gesture_key == "angry_face":
+                    current_meme_frames = meme_library['angry']
+                elif gesture_key == "eyebrows_raised":
+                    current_meme_frames = meme_library['eyebrows']
+                elif gesture_key == "biting_teeth":
+                    current_meme_frames = meme_library['teeth']
+                elif gesture_key == "both_hands_chin":
+                    current_meme_frames = meme_library['both_hands']
+                
+                current_meme_index = 0
+            
+            # Display webcam
+            webcam_placeholder.image(rgb, channels="RGB", use_container_width=True)
+            
+            # Display meme
+            if len(current_meme_frames) > 0:
+                meme_frame = current_meme_frames[current_meme_index]
+                meme_placeholder.image(meme_frame, channels="RGB", use_container_width=True)
+                current_meme_index = (current_meme_index + 1) % len(current_meme_frames)
             else:
-                frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-
-        elif active_mode == "video":
-            if not video_queue.empty():
-                frame_to_show = cv2.resize(video_queue.get(), (cam_w, cam_h))
-            elif video_done_flag.is_set():
-                set_idle_state()
-                frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-            else:
-                frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-
-        elif active_mode == "idle":
-            frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-
-        else:
-            frame_to_show = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-
-        # SAFETY NORMALIZATION
-        if frame_to_show is None or not isinstance(frame_to_show, np.ndarray):
-            frame_to_show = np.zeros_like(resized_cam)
-
-        if len(frame_to_show.shape) == 2:
-            frame_to_show = cv2.cvtColor(frame_to_show, cv2.COLOR_GRAY2BGR)
-
-        if frame_to_show.shape[2] == 4:
-            frame_to_show = frame_to_show[:, :, :3]
-
-        frame_to_show = cv2.resize(frame_to_show, (resized_cam.shape[1], resized_cam.shape[0]))
-
-        combined = cv2.hconcat([resized_cam, frame_to_show])
-        cv2.imshow("Freak Detector", combined)
-
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
+                meme_placeholder.info("👀 Waiting for gesture...")
+            
+            # Status
+            status_text = f"🎯 Status: **{'Detecting...' if gesture_key == 'none' else gesture_name}** | Cooldown: {cooldown_counter}"
+            status_placeholder.markdown(status_text)
+            
+            time.sleep(0.03)
+        
+        cap.release()
+    else:
+        st.info("👆 Click 'Start Detection' in the sidebar to begin!")
 
 if __name__ == "__main__":
-    run_opencv_app()
+    main()
